@@ -1,0 +1,372 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Reusable Hardened Primitives ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isValidStringArray(arr, maxItems) {
+      return arr is list && arr.size() <= maxItems && (arr.size() == 0 || arr[0] is string);
+    }
+
+    // --- Validation Blueprints ---
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'fullName', 'email', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'fullName', 'email', 'role', 'organization', 'reminderPreferences', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && isValidString(data.fullName, 1, 120)
+        && isValidString(data.email, 3, 200)
+        && (!('role' in data) || (data.role in ['student', 'educator', 'manager', 'operations', 'admin'] && isValidString(data.role, 1, 32)))
+        && (!('organization' in data) || isValidString(data.organization, 0, 150))
+        && (!('reminderPreferences' in data) || data.reminderPreferences is map)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDocumentRecord(data, docId) {
+      return data.keys().hasAll(['id', 'userId', 'title', 'sourceType', 'fileHash', 'normalizedHash', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'userId', 'title', 'category', 'sourceType', 'fileName', 'fileHash', 'normalizedHash', 'contentExcerpt', 'analysis', 'isDemo', 'createdAt', 'updatedAt'])
+        && data.id == docId
+        && isValidId(data.id)
+        && data.userId == request.auth.uid
+        && isValidId(data.userId)
+        && isValidString(data.title, 1, 300)
+        && (!('category' in data) || isValidString(data.category, 0, 80))
+        && (data.sourceType in ['pdf', 'image', 'txt', 'text'])
+        && (!('fileName' in data) || isValidString(data.fileName, 0, 255))
+        && isValidString(data.fileHash, 1, 128)
+        && isValidString(data.normalizedHash, 1, 128)
+        && (!('contentExcerpt' in data) || isValidString(data.contentExcerpt, 0, 4000))
+        && (!('analysis' in data) || data.analysis is map)
+        && (!('isDemo' in data) || data.isDemo is bool)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWorkflowRecord(data, workflowId) {
+      return data.keys().hasAll(['id', 'userId', 'title', 'sourceMethod', 'status', 'priority', 'progress', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'userId', 'documentId', 'documentTitle', 'title', 'description',
+          'category', 'objective', 'sourceMethod', 'status', 'priority',
+          'responsibleRoles', 'completionConditions', 'requiredApprovals',
+          'history', 'taskCount', 'completedTaskCount', 'progress', 'isDemo',
+          'createdAt', 'updatedAt'
+        ])
+        && data.id == workflowId
+        && isValidId(data.id)
+        && data.userId == request.auth.uid
+        && isValidId(data.userId)
+        && (!('documentId' in data) || isValidString(data.documentId, 0, 128))
+        && (!('documentTitle' in data) || isValidString(data.documentTitle, 0, 300))
+        && isValidString(data.title, 1, 300)
+        && (!('description' in data) || isValidString(data.description, 0, 2000))
+        && (!('category' in data) || isValidString(data.category, 0, 80))
+        && (!('objective' in data) || isValidString(data.objective, 0, 1000))
+        && (data.sourceMethod in ['document', 'text', 'manual'])
+        && (data.status in ['draft', 'pending_review', 'approved', 'in_progress', 'completed', 'rejected', 'archived'])
+        && (data.priority in ['low', 'medium', 'high', 'critical'])
+        && (!('responsibleRoles' in data) || isValidStringArray(data.responsibleRoles, 15))
+        && (!('completionConditions' in data) || isValidStringArray(data.completionConditions, 15))
+        && (!('requiredApprovals' in data) || isValidStringArray(data.requiredApprovals, 15))
+        && (!('history' in data) || (data.history is list && data.history.size() <= 50 && (data.history.size() == 0 || data.history[0] is map)))
+        && (!('taskCount' in data) || (data.taskCount is number && data.taskCount >= 0 && data.taskCount <= 500))
+        && (!('completedTaskCount' in data) || (data.completedTaskCount is number && data.completedTaskCount >= 0 && data.completedTaskCount <= 500))
+        && data.progress is number && data.progress >= 0 && data.progress <= 100
+        && (!('isDemo' in data) || data.isDemo is bool)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTaskRecord(data, taskId) {
+      return data.keys().hasAll(['id', 'userId', 'workflowId', 'title', 'priority', 'status', 'orderIndex', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'userId', 'workflowId', 'workflowTitle', 'title', 'description',
+          'assignedUser', 'priority', 'startDate', 'dueDate', 'status',
+          'dependencies', 'orderIndex', 'reminderDate', 'reminderTime',
+          'isDemo', 'createdAt', 'updatedAt'
+        ])
+        && data.id == taskId
+        && isValidId(data.id)
+        && data.userId == request.auth.uid
+        && isValidId(data.userId)
+        && isValidId(data.workflowId)
+        && (!('workflowTitle' in data) || isValidString(data.workflowTitle, 0, 300))
+        && isValidString(data.title, 1, 300)
+        && (!('description' in data) || isValidString(data.description, 0, 2000))
+        && (!('assignedUser' in data) || isValidString(data.assignedUser, 0, 150))
+        && (data.priority in ['low', 'medium', 'high', 'critical'])
+        && (!('startDate' in data) || isValidString(data.startDate, 0, 40))
+        && (!('dueDate' in data) || isValidString(data.dueDate, 0, 40))
+        && (data.status in ['todo', 'in_progress', 'under_review', 'completed', 'overdue'])
+        && (!('dependencies' in data) || isValidStringArray(data.dependencies, 20))
+        && data.orderIndex is number && data.orderIndex >= 0 && data.orderIndex <= 1000
+        && (!('reminderDate' in data) || isValidString(data.reminderDate, 0, 40))
+        && (!('reminderTime' in data) || isValidString(data.reminderTime, 0, 20))
+        && (!('isDemo' in data) || data.isDemo is bool)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCalendarEvent(data, eventId) {
+      return data.keys().hasAll(['id', 'userId', 'title', 'eventDate', 'eventType', 'priority', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'userId', 'workflowId', 'title', 'description', 'eventDate', 'eventTime', 'eventType', 'priority', 'createdAt', 'updatedAt'])
+        && data.id == eventId
+        && isValidId(data.id)
+        && data.userId == request.auth.uid
+        && isValidId(data.userId)
+        && (!('workflowId' in data) || isValidString(data.workflowId, 0, 128))
+        && isValidString(data.title, 1, 300)
+        && (!('description' in data) || isValidString(data.description, 0, 1000))
+        && isValidString(data.eventDate, 4, 40)
+        && (!('eventTime' in data) || isValidString(data.eventTime, 0, 20))
+        && (data.eventType in ['deadline', 'milestone', 'event', 'reminder'])
+        && (data.priority in ['low', 'medium', 'high', 'critical'])
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotification(data, notifId) {
+      return data.keys().hasAll(['id', 'userId', 'title', 'message', 'type', 'read', 'createdAt'])
+        && data.keys().hasOnly(['id', 'userId', 'title', 'message', 'type', 'relatedId', 'read', 'scheduledFor', 'createdAt'])
+        && data.id == notifId
+        && isValidId(data.id)
+        && data.userId == request.auth.uid
+        && isValidId(data.userId)
+        && isValidString(data.title, 1, 200)
+        && isValidString(data.message, 1, 1000)
+        && (data.type in ['deadline', 'overdue', 'approval', 'assignment', 'summary', 'system'])
+        && (!('relatedId' in data) || isValidString(data.relatedId, 0, 128))
+        && data.read is bool
+        && (!('scheduledFor' in data) || isValidString(data.scheduledFor, 0, 40))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidActivity(data, activityId) {
+      return data.keys().hasAll(['id', 'userId', 'action', 'entityType', 'createdAt'])
+        && data.keys().hasOnly(['id', 'userId', 'action', 'details', 'entityType', 'entityId', 'createdAt'])
+        && data.id == activityId
+        && isValidId(data.id)
+        && data.userId == request.auth.uid
+        && isValidId(data.userId)
+        && isValidString(data.action, 1, 120)
+        && (!('details' in data) || isValidString(data.details, 0, 500))
+        && (data.entityType in ['document', 'workflow', 'task', 'calendar', 'integration'])
+        && (!('entityId' in data) || isValidString(data.entityId, 0, 128))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidIntegration(data, integrationId) {
+      return data.keys().hasAll(['id', 'userId', 'provider', 'status', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'userId', 'provider', 'status', 'webhookUrl', 'configNotes', 'updatedAt'])
+        && data.id == integrationId
+        && isValidId(data.id)
+        && data.userId == request.auth.uid
+        && isValidId(data.userId)
+        && (data.provider in ['google_calendar', 'gmail', 'slack', 'microsoft_teams', 'webhooks', 'n8n'])
+        && (data.status in ['not_connected', 'configured', 'connected'])
+        && (!('webhookUrl' in data) || isValidString(data.webhookUrl, 0, 500))
+        && (!('configNotes' in data) || isValidString(data.configNotes, 0, 1000))
+        && data.updatedAt is timestamp;
+    }
+
+    // --- Collection Rules ---
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'role', 'organization', 'reminderPreferences', 'updatedAt']);
+      allow delete: if isValidId(userId) && isOwner(userId);
+    }
+
+    match /documents/{documentId} {
+      allow get: if isValidId(documentId) && isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(documentId)
+        && isVerifiedUser()
+        && isValidDocumentRecord(incoming(), documentId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(documentId)
+        && isVerifiedUser()
+        && existing().userId == request.auth.uid
+        && isValidDocumentRecord(incoming(), documentId)
+        && incoming().id == existing().id
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'category', 'analysis', 'updatedAt']);
+      allow delete: if isValidId(documentId) && isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+
+    match /workflows/{workflowId} {
+      allow get: if isValidId(workflowId) && isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(workflowId)
+        && isVerifiedUser()
+        && isValidWorkflowRecord(incoming(), workflowId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(workflowId)
+        && isVerifiedUser()
+        && existing().userId == request.auth.uid
+        && existing().status != 'archived'
+        && isValidWorkflowRecord(incoming(), workflowId)
+        && incoming().id == existing().id
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (existing().status != 'completed' && incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'description', 'category', 'objective', 'status', 'priority',
+            'responsibleRoles', 'completionConditions', 'requiredApprovals',
+            'history', 'taskCount', 'completedTaskCount', 'progress', 'updatedAt'
+          ])) ||
+          (existing().status == 'completed' && incoming().status == 'archived' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'history', 'updatedAt']))
+        );
+      allow delete: if isValidId(workflowId) && isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+
+    match /tasks/{taskId} {
+      allow get: if isValidId(taskId) && isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(taskId)
+        && isVerifiedUser()
+        && isValidTaskRecord(incoming(), taskId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/workflows/$(incoming().workflowId))
+        && get(/databases/$(database)/documents/workflows/$(incoming().workflowId)).data.userId == request.auth.uid;
+      allow update: if isValidId(taskId)
+        && isVerifiedUser()
+        && existing().userId == request.auth.uid
+        && isValidTaskRecord(incoming(), taskId)
+        && incoming().id == existing().id
+        && incoming().userId == existing().userId
+        && incoming().workflowId == existing().workflowId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'workflowTitle', 'title', 'description', 'assignedUser', 'priority',
+          'startDate', 'dueDate', 'status', 'dependencies', 'orderIndex',
+          'reminderDate', 'reminderTime', 'updatedAt'
+        ]);
+      allow delete: if isValidId(taskId) && isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+
+    match /calendarEvents/{eventId} {
+      allow get: if isValidId(eventId) && isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(eventId)
+        && isVerifiedUser()
+        && isValidCalendarEvent(incoming(), eventId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(eventId)
+        && isVerifiedUser()
+        && existing().userId == request.auth.uid
+        && isValidCalendarEvent(incoming(), eventId)
+        && incoming().id == existing().id
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'workflowId', 'title', 'description', 'eventDate', 'eventTime',
+          'eventType', 'priority', 'updatedAt'
+        ]);
+      allow delete: if isValidId(eventId) && isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(notificationId)
+        && isVerifiedUser()
+        && isValidNotification(incoming(), notificationId)
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(notificationId)
+        && isVerifiedUser()
+        && existing().userId == request.auth.uid
+        && isValidNotification(incoming(), notificationId)
+        && incoming().id == existing().id
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+      allow delete: if isValidId(notificationId) && isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+
+    match /activities/{activityId} {
+      allow get: if isValidId(activityId) && isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(activityId)
+        && isVerifiedUser()
+        && isValidActivity(incoming(), activityId)
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(activityId) && isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+
+    match /integrations/{integrationId} {
+      allow get: if isValidId(integrationId) && isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(integrationId)
+        && isVerifiedUser()
+        && isValidIntegration(incoming(), integrationId)
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(integrationId)
+        && isVerifiedUser()
+        && existing().userId == request.auth.uid
+        && isValidIntegration(incoming(), integrationId)
+        && incoming().id == existing().id
+        && incoming().userId == existing().userId
+        && incoming().provider == existing().provider
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'webhookUrl', 'configNotes', 'updatedAt']);
+      allow delete: if isValidId(integrationId) && isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+  }
+}
