@@ -1,10 +1,9 @@
 import 'dotenv/config';
-import express, { Request, Response } from 'express';
+import express, { type Request, type Response } from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import multer from 'multer';
-import { createServer as createViteServer } from 'vite';
 import {
   GeminiServiceError,
   analyzeDocumentWithGemini,
@@ -12,7 +11,20 @@ import {
   runAssistantWithGemini,
 } from './server/gemini.ts';
 
-const PORT = 3000;
+function getCliArg(flag: string): string | undefined {
+  const idx = process.argv.indexOf(flag);
+  if (idx !== -1 && idx + 1 < process.argv.length) {
+    return process.argv[idx + 1];
+  }
+  const prefix = `${flag}=`;
+  const match = process.argv.find((arg) => arg.startsWith(prefix));
+  return match ? match.slice(prefix.length) : undefined;
+}
+
+const rawPort = getCliArg('--port') ?? process.env.PORT;
+const parsedPort = rawPort ? Number(rawPort) : 3000;
+const PORT = Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort <= 65535 ? parsedPort : 3000;
+const HOST = getCliArg('--host') || process.env.HOST || '0.0.0.0';
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
 const ALLOWED_MIME_TYPES = new Set([
@@ -272,25 +284,57 @@ async function startServer() {
     }
   });
 
-  const isProd = process.env.NODE_ENV === 'production';
   const distDir = path.resolve(process.cwd(), 'dist');
+  const distIndexPath = path.join(distDir, 'index.html');
+  const hasDistBuild = fs.existsSync(distIndexPath);
+  const isProd =
+    process.env.NODE_ENV === 'production' ||
+    (process.env.NODE_ENV !== 'development' && hasDistBuild);
 
-  if (!isProd || !fs.existsSync(distDir)) {
+  console.log(
+    `[Procify AI] Starting server (mode=${isProd ? 'production' : 'development'}, hasDistBuild=${hasDistBuild}, host=${HOST}, port=${PORT}, envPORT=${process.env.PORT ?? 'unset'})`
+  );
+
+  if (!isProd) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(distDir));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distDir, 'index.html'));
+    if (!hasDistBuild) {
+      console.error(
+        `[Procify AI] Production build missing at ${distIndexPath}. Run "npm run build" before starting the production server.`
+      );
+    }
+    app.use(express.static(distDir, { index: 'index.html' }));
+    app.get('*', (req: Request, res: Response) => {
+      if (req.path.startsWith('/api/')) {
+        res.status(404).json({ error: 'API endpoint not found.' });
+        return;
+      }
+      if (!fs.existsSync(distIndexPath)) {
+        res.status(503).send('Production build not found. Run npm run build first.');
+        return;
+      }
+      res.sendFile(distIndexPath);
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Procify AI server listening on http://0.0.0.0:${PORT}`);
+  const server = app.listen(PORT, HOST, () => {
+    console.log(
+      `[Procify AI] Server started successfully in ${isProd ? 'production' : 'development'} mode on http://${HOST}:${PORT}`
+    );
+  });
+
+  server.on('error', (err: unknown) => {
+    console.error(`[Procify AI] Failed to bind server on http://${HOST}:${PORT}:`, err);
+    process.exit(1);
   });
 }
 
-startServer();
+startServer().catch((err: unknown) => {
+  console.error('[Procify AI] Fatal startup error:', err);
+  process.exit(1);
+});
